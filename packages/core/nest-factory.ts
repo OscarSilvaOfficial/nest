@@ -27,6 +27,9 @@ import { NestApplication } from './nest-application';
 import { NestApplicationContext } from './nest-application-context';
 import { DependenciesScanner } from './scanner';
 
+import cluster from 'node:cluster';
+import { cpus } from 'os';
+
 /**
  * @publicApi
  */
@@ -71,35 +74,51 @@ export class NestFactoryStatic {
     serverOrOptions?: AbstractHttpAdapter | NestApplicationOptions,
     options?: NestApplicationOptions,
   ): Promise<T> {
-    const [httpServer, appOptions] = this.isHttpServer(serverOrOptions)
-      ? [serverOrOptions, options]
-      : [this.createHttpAdapter(), serverOrOptions];
+    if (cluster.isPrimary) {
+      const numCPUs = cpus().length;
 
-    const applicationConfig = new ApplicationConfig();
-    const container = new NestContainer(applicationConfig);
-    const graphInspector = this.createGraphInspector(appOptions, container);
+      this.logger.log(`Master server started on PID: ${process.pid}`);
+      this.logger.log(`Forking server for ${numCPUs} CPUs...`);
 
-    this.setAbortOnError(serverOrOptions, options);
-    this.registerLoggerConfiguration(appOptions);
+      for (let i = 0; i < numCPUs; i++) {
+        cluster.fork();
+      }
 
-    await this.initialize(
-      moduleCls,
-      container,
-      graphInspector,
-      applicationConfig,
-      appOptions,
-      httpServer,
-    );
+      cluster.on('exit', worker => {
+        this.logger.warn(`Worker ${worker.process.pid} died. Restarting...`);
+        cluster.fork();
+      });
+    } else {
+      const [httpServer, appOptions] = this.isHttpServer(serverOrOptions)
+        ? [serverOrOptions, options]
+        : [this.createHttpAdapter(), serverOrOptions];
 
-    const instance = new NestApplication(
-      container,
-      httpServer,
-      applicationConfig,
-      graphInspector,
-      appOptions,
-    );
-    const target = this.createNestInstance(instance);
-    return this.createAdapterProxy<T>(target, httpServer);
+      const applicationConfig = new ApplicationConfig();
+      const container = new NestContainer(applicationConfig);
+      const graphInspector = this.createGraphInspector(appOptions, container);
+
+      this.setAbortOnError(serverOrOptions, options);
+      this.registerLoggerConfiguration(appOptions);
+
+      await this.initialize(
+        moduleCls,
+        container,
+        graphInspector,
+        applicationConfig,
+        appOptions,
+        httpServer,
+      );
+
+      const instance = new NestApplication(
+        container,
+        httpServer,
+        applicationConfig,
+        graphInspector,
+        appOptions,
+      );
+      const target = this.createNestInstance(instance);
+      return this.createAdapterProxy<T>(target, httpServer);
+    }
   }
 
   /**
